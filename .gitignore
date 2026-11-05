@@ -1,11 +1,11 @@
 .DS_Store
 .venv/
-.env
-.streamlit/secrets.toml
-.local/
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
 build/
 dist/
+.streamlit/secrets.toml
+# Rebuilt by `python -m predictive_cooling.pipeline` (trained models + test logs)
+artifacts/

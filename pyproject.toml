@@ -3,28 +3,20 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cooling-advisor-demo"
-version = "0.2.0"
-description = "Local cooling-advisor workflow with explicit skills and guardrails"
-requires-python = ">=3.12,<3.15"
+name = "predictive-cooling"
+version = "0.3.0"
+description = "Mock data-center sensors -> ML forecast -> 81-plan MPC -> safety filter -> plant, with a Streamlit dashboard"
+requires-python = ">=3.11"
 dependencies = [
-  "numpy>=1.26,<3", "streamlit>=1.40,<2", "plotly>=5,<7", "pandas>=2,<4",
-  "fastapi>=0.115,<1", "uvicorn>=0.30,<1", "pydantic>=2,<3",
-  "langgraph>=1,<2", "httpx>=0.27,<1", "python-dotenv>=1,<2",
+  "numpy>=1.26,<3", "pandas>=2.1,<4", "scikit-learn>=1.4,<2",
+  "plotly>=5.19,<8", "streamlit>=1.45,<2",
 ]
 
 [project.optional-dependencies]
-integrations = ["google-genai>=1,<3", "supabase>=2,<3"]
 dev = ["pytest>=8,<10"]
 
-[project.scripts]
-cooling-demo = "cooling_advisor.__main__:main"
-
 [tool.setuptools.packages.find]
-include = ["cooling_advisor*"]
-
-[tool.setuptools.package-data]
-cooling_advisor = ["data/*.json", "skill_specs/*.md"]
+include = ["predictive_cooling*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
