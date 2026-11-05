@@ -3,6 +3,13 @@
     streamlit run app.py          (or: python -m predictive_cooling)
 """
 import os
+
+# One thread per math library, set before numpy / scikit-learn load. Otherwise OpenMP/BLAS start one thread per
+# host core; on Streamlit Cloud (many host cores, ~1 core of quota) that oversubscription used ~10x more CPU per
+# rerun and got the app throttled. Measured locally: 3.5 s → 0.3 s CPU per rerun, and faster wall time.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 import sys
 import time
 
@@ -19,6 +26,11 @@ from predictive_cooling.mpc import MPC
 from predictive_cooling.agents import AgentContext, CaseRequest, plans_table, run_case
 from predictive_cooling.agents.skills import ROLES, SKILLS
 from predictive_cooling.safety import RULES
+from threadpoolctl import threadpool_limits
+
+# The env vars above only help if numpy/sklearn were not loaded yet, and Streamlit runs every rerun in a new thread
+# (OpenMP thread counts are per thread), so also cap the already-loaded pools on every run.
+threadpool_limits(limits=1)
 
 st.set_page_config(page_title="Predictive Cooling", page_icon=":material/ac_unit:", layout="wide")
 
