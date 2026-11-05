@@ -7,5 +7,7 @@ __pycache__/
 build/
 dist/
 .streamlit/secrets.toml
-# Rebuilt by `python -m predictive_cooling.pipeline` (trained models + test logs)
-artifacts/
+# Rebuilt by `python -m predictive_cooling.pipeline` (trained models + test logs).
+# bundle.pkl is committed so a deployed app starts without retraining (built on Python 3.12, see requirements.txt).
+artifacts/*
+!artifacts/bundle.pkl

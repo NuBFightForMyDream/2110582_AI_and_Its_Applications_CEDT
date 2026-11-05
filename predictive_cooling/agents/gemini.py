@@ -58,9 +58,13 @@ class GeminiProvider:
         declarations = [types.FunctionDeclaration(name=name, description=description,
                                                   parameters_json_schema=schema.model_json_schema())
                         for name, (description, schema) in tools.items()]
+        # Retry rate limits and transient server errors (Gemini often answers 503 "high demand" for a few seconds,
+        # and free keys hit 429 per-minute quotas). Waits ≈ 2, 6, 18 s. The case deadline still bounds the whole run.
+        retry = types.HttpRetryOptions(attempts=4, initial_delay=2.0, max_delay=20.0, exp_base=3.0, jitter=1.0,
+                                       http_status_codes=[429, 500, 502, 503, 504])
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"],
                               http_options=types.HttpOptions(timeout=max(1000, int(timeout * 1000)),
-                                                             retry_options=types.HttpRetryOptions(attempts=1)))
+                                                             retry_options=retry))
         try:
             response = client.models.generate_content(
                 model=os.getenv("GEMINI_MODEL", "gemini-flash-latest"), contents=history,

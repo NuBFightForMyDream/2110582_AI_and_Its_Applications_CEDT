@@ -9,6 +9,27 @@ guardrails G1/G2/G3, and offline or Gemini mode. What changed is what the agents
 data center**, use a **forecaster trained on a mock sensor dataset**, and choose a setpoint with **MPC**. Infrastructure that was
 not needed for the idea (FastAPI, Supabase/auth, SustainDC install, CSV import) is removed.
 
+## The idea in 30 seconds
+
+| The problem | The idea | The result |
+|---|---|---|
+| Server rooms run their cooling at a safe but cold setpoint all day. Colder than needed = wasted electricity. | Every 15 minutes: **forecast the next hour**, try **81 setpoint plans**, keep only the ones that stay below 27 °C, and pick the cheapest. | **2.1 % less cooling energy** than a tuned rule-based controller (5.0 % vs a fixed setpoint), **0 minutes** above 27 °C. |
+
+```mermaid
+flowchart LR
+    S["① Sensors<br/>12 rack inlets, power,<br/>weather · every 15 min"]:::step --> CL["② Clean<br/>gaps, glitches,<br/>stuck sensors"]:::step
+    CL --> F["③ Forecast (ML)<br/>next 60 min for<br/>any setpoint plan"]:::ai
+    F --> M["④ MPC<br/>try 81 plans → keep safe<br/>→ pick cheapest"]:::ai
+    M --> SF["⑤ Safety filter<br/>4 rules check<br/>every command"]:::guard
+    SF --> P["⑥ Room<br/>apply the setpoint,<br/>repeat in 15 min ↺"]:::ok
+    classDef step fill:#ffffff,stroke:#c3c2b7,color:#0b0b0b
+    classDef ai fill:#e8f1fc,stroke:#2a78d6,color:#0b0b0b,stroke-width:2px
+    classDef guard fill:#fbeeee,stroke:#d03b3b,color:#0b0b0b
+    classDef ok fill:#e6f6ef,stroke:#1baf7a,color:#0b0b0b
+```
+
+Blue = machine learning, red = safety, green = what reaches the room.
+
 ![architecture](docs/pipeline.png)
 
 ## Two layers
@@ -45,8 +66,27 @@ flowchart TD
 
 **Modes.** *Offline*: LangGraph runs fixed role procedures, no LLM, deterministic. *Gemini*: real parent/child function
 calling (separate histories, one tool per turn, phase-limited tool lists, shared budgets). Set `GEMINI_API_KEY` (and optionally
-`GEMINI_MODEL`) to use it. Without a key the case fails closed. **Live Gemini has not been tested here (no API key)**; the loops
-are tested with a scripted provider, including a forged proposal that G3 must reject.
+`GEMINI_MODEL`) to use it. Without a key the case fails closed. Live run (5 Nov 2026, `gemini-3.5-flash-lite`, case
+21 Apr 00:30): 11 model calls, 36.8 s, G3 6/6 passed, same answer as offline (21 °C, plan 21 → 21 → 21 → 22). Gemini
+cases get a 300 s deadline and retry 429/5xx errors. On a free key, prefer a flash-lite model: one case needs ~11
+requests, the bigger flash models allow only ~20 requests per day, and `gemini-flash-latest` often answers 503
+"high demand". The loops are also tested with a scripted provider, including a forged proposal that G3 must reject.
+
+```mermaid
+sequenceDiagram
+    participant O as Operator
+    participant S as Supervisor
+    participant D as Data Analyst
+    participant C as Cooling Advisor
+    participant G as G3 verify
+    O->>S: question + moment (checked by G1)
+    S->>D: inspect sensors, forecast next hour
+    D-->>S: data OK? hold-setpoint forecast
+    S->>C: find the best safe setpoint
+    C-->>S: proposal (81-plan MPC + safety)
+    S->>G: re-read sensors, recompute all
+    G-->>O: verified answer (or fallback)
+```
 
 ![agent trace](docs/agents-trace.png)
 
@@ -84,6 +124,21 @@ How the data is made (`predictive_cooling/dataset.py`):
 
 Regenerate it with `python -m predictive_cooling.dataset` (seeds are fixed, so the result is identical every time).
 
+Cleaning and the time-based split (never shuffle a time series: the model is scored on weeks it never saw):
+
+```mermaid
+flowchart LR
+    R["Raw log"]:::step --> A["1 · back on the<br/>15-min grid"]:::step --> B["2 · impossible<br/>values → missing"]:::guard
+    B --> S["3 · stuck sensor<br/>(6+ repeats) → missing"]:::guard --> F["4 · fill holes<br/>≤ 1 hour"]:::step
+    F --> T["Train<br/>weeks 1–9"]:::ai
+    F --> V["Validate<br/>weeks 10–11"]:::step
+    F --> X["Test<br/>weeks 12–13"]:::ok
+    classDef step fill:#ffffff,stroke:#c3c2b7,color:#0b0b0b
+    classDef ai fill:#e8f1fc,stroke:#2a78d6,color:#0b0b0b,stroke-width:2px
+    classDef guard fill:#fbeeee,stroke:#d03b3b,color:#0b0b0b
+    classDef ok fill:#e6f6ef,stroke:#1baf7a,color:#0b0b0b
+```
+
 ## The steps in code
 
 | Step | File | What it does |
@@ -116,6 +171,24 @@ The ML model learned from history that the batch starts at 01:00 on weekdays, so
 
 ### ④ How the MPC chooses
 
+Like a GPS: try every route for the next hour, drop the ones that overheat, take the cheapest, drive only the first
+15 minutes, then plan again with fresh data.
+
+```mermaid
+flowchart LR
+    N["Setpoint now"]:::step --> C["Each 15 min:<br/>−1, 0 or +1 °C"]:::step
+    C --> P["4 steps → 3⁴ =<br/>81 plans"]:::step
+    P --> F["Forecast every plan"]:::ai
+    F --> D{"peak + safety margin<br/>≤ 27 °C?"}:::guard
+    D -- no --> X["Rejected"]:::guard
+    D -- yes --> E["Cheapest safe plan<br/>(least kWh)"]:::ok
+    E --> A["Apply only<br/>its first step"]:::ok
+    classDef step fill:#ffffff,stroke:#c3c2b7,color:#0b0b0b
+    classDef ai fill:#e8f1fc,stroke:#2a78d6,color:#0b0b0b,stroke-width:2px
+    classDef guard fill:#fbeeee,stroke:#d03b3b,color:#0b0b0b
+    classDef ok fill:#e6f6ef,stroke:#1baf7a,color:#0b0b0b
+```
+
 Example at 00:30, just before the GPU batch: 18 of the 81 plans are safe, and the cheapest is 21 → 21 → 21 → 22 °C.
 It lowers the setpoint by 1 °C first to pre-cool for the 01:00 job.
 
@@ -132,6 +205,16 @@ It lowers the setpoint by 1 °C first to pre-cool for the 01:00 job.
 | Average setpoint | 20.0 °C | 21.4 °C | 22.4 °C |
 | Decision time per step | – | – | 24 ms (target < 10 s) |
 
+```mermaid
+xychart-beta
+    title "Cooling energy over 14 test days (kWh, lower is better)"
+    x-axis ["Fixed 20 °C", "Rule-based", "AI + MPC"]
+    y-axis "kWh" 11500 --> 12700
+    bar [12512, 12144, 11892]
+```
+
+The axis starts at 11,500 kWh to make the gap visible; most cooling energy is needed whatever the setpoint.
+
 **Summary:** the AI cuts cooling energy by **5.0 %** vs the fixed setpoint and **2.1 %** vs the tuned rule-based controller.
 Whole-building energy drops by 1.22 % / 0.40 % (about 57,000 / 18,500 THB per year at 4 THB/kWh), with no overheating at any point.
 
@@ -144,6 +227,23 @@ Whole-building energy drops by 1.22 % / 0.40 % (about 57,000 / 18,500 THB per ye
 > Next steps: fix the airflow at B6 (blanking panels/containment) or add knobs such as chilled-water temperature and fan speed.
 
 ### ⑤ Fault tests (minutes with inlet > 27 °C)
+
+The AI only *proposes*; four rules can override it before anything is sent:
+
+```mermaid
+flowchart LR
+    P["MPC proposal"]:::ai --> R1{"R1 · sensor<br/>missing?"}:::guard
+    R1 -- yes --> FB["Fallback setpoint"]:::ok
+    R1 -- no --> R2{"R2 · conditions never<br/>seen in training?"}:::guard
+    R2 -- yes --> FB
+    R2 -- no --> R3{"R3 · rack already<br/>near 27 °C?"}:::guard
+    R3 -- yes --> CO["Cool 2 °C now"]:::ok
+    R3 -- no --> R4["R4 · max ±1 °C per step,<br/>stay within 16–24 °C"]:::guard
+    R4 --> SEND["Send command"]:::ok
+    classDef ai fill:#e8f1fc,stroke:#2a78d6,color:#0b0b0b,stroke-width:2px
+    classDef guard fill:#fbeeee,stroke:#d03b3b,color:#0b0b0b
+    classDef ok fill:#e6f6ef,stroke:#1baf7a,color:#0b0b0b
+```
 
 | Scenario | Fixed | Rule-based | AI + MPC | AI without safety filter |
 |---|---|---|---|---|
@@ -158,7 +258,8 @@ Whole-building energy drops by 1.22 % / 0.40 % (about 57,000 / 18,500 THB per ye
 
 ## How to run
 
-Requires Python 3.11+ (tested on 3.12).
+Requires Python 3.11+ (tested on 3.12). `requirements.txt` pins exact versions because the committed
+`artifacts/bundle.pkl` is only reused when scikit-learn matches; otherwise the first start retrains (1–3 minutes).
 
 ```bash
 python3 -m venv .venv
@@ -172,7 +273,8 @@ python3 -m venv .venv
 .venv/bin/python -m predictive_cooling
 ```
 
-The last command trains and tests everything (about 1–3 minutes, results cached in `artifacts/`) and then opens the dashboard at http://localhost:8501.
+The last command opens the dashboard at http://localhost:8501 (if `artifacts/bundle.pkl` is missing or was built with
+another scikit-learn, it first trains and tests everything, about 1–3 minutes).
 To run only the pipeline and print the result tables:
 
 ```bash
@@ -185,15 +287,52 @@ Ask the agents from the command line:
 .venv/bin/python -m predictive_cooling.agents --at "2026-04-21 00:30"
 ```
 
-Tests (27 tests, about 20 seconds):
+Tests (30 tests, about 40 seconds):
 
 ```bash
 .venv/bin/python -m pytest -q
 ```
 
+## Deploy
+
+LangGraph is a Python library that runs inside the Streamlit process, so the whole app is **one Streamlit service**.
+Gemini and Supabase are optional and switched on by secrets.
+
+```mermaid
+flowchart LR
+    U["Browser"]:::step --> A["Streamlit app<br/>app.py + LangGraph agents<br/>+ forecaster (bundle.pkl)"]:::ai
+    A -. "agent mode = Gemini<br/>GEMINI_API_KEY" .-> G["Gemini API"]:::step
+    A -. "SUPABASE_URL / SUPABASE_KEY" .-> D[("Supabase<br/>agent_cases")]:::ok
+    classDef step fill:#ffffff,stroke:#c3c2b7,color:#0b0b0b
+    classDef ai fill:#e8f1fc,stroke:#2a78d6,color:#0b0b0b,stroke-width:2px
+    classDef ok fill:#e6f6ef,stroke:#1baf7a,color:#0b0b0b
+```
+
+**Streamlit Community Cloud (free)**
+
+1. Push this branch to GitHub (`artifacts/bundle.pkl` is committed so the app starts without retraining).
+2. On [share.streamlit.io](https://share.streamlit.io) → *Create app* → pick the repo, branch `claude-new-version`, main file `app.py`.
+   Under *Advanced settings* choose **Python 3.12**.
+3. Paste your secrets (template: `.streamlit/secrets.toml.example`). Every key is optional:
+   - `GEMINI_API_KEY` (from Google AI Studio) enables the *Gemini* agent mode; set `GEMINI_MODEL = "gemini-3.5-flash-lite"` on a free key.
+   - `SUPABASE_URL` + `SUPABASE_KEY` enable the case history.
+
+**Supabase case history (optional)**
+
+1. Create a Supabase project and run `supabase/migrations/001_agent_cases.sql` in its SQL editor.
+2. Put the project URL and the **server-side secret key** in the secrets. The key stays on the server (Streamlit code
+   never runs in the browser); RLS is on and the public roles get no access to the table.
+3. Every *Run case* in the agents tab is saved; *Case history (Supabase)* at the bottom of the tab shows the latest 20.
+   If Supabase is down the case still runs and a toast says it was not saved.
+
+For local runs, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` (git-ignored) or export the same
+names as environment variables.
+
 ## Dashboard
 
-0. **Ask the agents**: pick a moment, a task (recommend / analyze), optional failed sensors and the agent mode. You see the answer, a swimlane trace of who did what (G1 → Supervisor → G2 → Data Analyst → Cooling Advisor → G3), the G3 checklist and the forecast vs the chosen plan.
+Every tab starts with an **In short** box (the message in plain language) and, where it helps, a diagram of the step.
+
+0. **Ask the agents**: pick a moment, a task (recommend / analyze), optional failed sensors and the agent mode. You see the answer, a swimlane trace of who did what (G1 → Supervisor → G2 → Data Analyst → Cooling Advisor → G3), the G3 checklist, the forecast vs the chosen plan and (with Supabase) the case history.
 1. **Sensors**: floor map (heatmap of the 12 racks) for any day and time, the whole day as charts, a column dictionary and a CSV download.
 2. **Clean data**: the problems found in each sensor, raw vs cleaned, and the train/validation/test split.
 3. **Forecast**: error by horizon, forecast vs actual, feature importance, and **a what-if where you set a setpoint plan and see what the model predicts**.
@@ -223,6 +362,7 @@ predictive_cooling/
   controllers.py             Fixed / Rule-based / AI controllers
   evaluate.py                closed-loop tests + fault scenarios
   pipeline.py                runs everything + saves artifacts/
+  storage.py                 optional Supabase case history
   agents/                    agent layer (Supervisor, Data Analyst, Cooling Advisor)
     engine.py                LangGraph graph, G1/G2/G3, S5 compose, run_case()
     tools.py                 the tools agents may call (window ends at the case time)
@@ -230,6 +370,10 @@ predictive_cooling/
     skills.py, skill_specs/  S1–S5 registry and instructions
 tests/test_pipeline.py       tests for every step
 tests/test_agents.py         agent, guardrail and scripted-Gemini tests
+tests/test_storage.py        Supabase history (off without keys, failures never break a case)
+artifacts/bundle.pkl         trained models + test logs (committed for deployment)
+supabase/migrations/         SQL for the optional agent_cases table
+.streamlit/                  theme (config.toml) + secrets template
 docs/                        README images
 Midterm Project /            proposal report (PDF)
 ```

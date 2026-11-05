@@ -317,7 +317,8 @@ GRAPH = build_graph()
 def run_case(request: CaseRequest, ctx: T.AgentContext | None = None, policy: Policy | None = None,
              case_id: str | None = None) -> CaseResult:
     ctx = ctx or T.default_context()
-    policy = policy or Policy()
+    # A live LLM needs ~10-12 sequential calls (plus retries on 429/503), so Gemini gets a longer deadline.
+    policy = policy or (Policy(deadline_seconds=300) if request.agent_mode == "gemini" else Policy())
     rt = Runtime(request, ctx, policy, case_id or uuid4().hex[:12])
     rt.result.execution = {"policy": policy.model_dump(), "request": request.model_dump(mode="json"),
                            "skills": {sid: {"version": s.version, "sha256": hashlib.sha256(s.instructions().encode()).hexdigest()[:16]}

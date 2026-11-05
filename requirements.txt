@@ -1,11 +1,12 @@
-# Tested with: numpy 2.5, pandas 3.1, scikit-learn 1.9, plotly 7.1, streamlit 1.66,
-# langgraph 1.2, pydantic 2.14, google-genai 2.34 (Python 3.12)
-numpy>=1.26,<3
-pandas>=2.1,<4
-scikit-learn>=1.4,<2
-plotly>=5.19,<8
-streamlit>=1.45,<2
-langgraph>=1,<2
-pydantic>=2,<3
-google-genai>=1,<3     # only needed for Gemini agent mode
-pytest>=8,<10
+# Exact versions: the committed artifacts/bundle.pkl is only reused when scikit-learn matches exactly
+# (otherwise the app retrains on first start). Built and tested on Python 3.12.
+numpy==2.5.4
+pandas==3.1.1
+scikit-learn==1.9.1
+plotly==7.1.0
+streamlit==1.66.1
+langgraph==1.2.20
+pydantic==2.14.3
+google-genai==2.34.0    # Gemini agent mode
+supabase==2.34.0        # optional case history (only used when SUPABASE_URL / SUPABASE_KEY are set)
+pytest==9.2.0
