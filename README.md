@@ -2,29 +2,58 @@
 
 > **"If the load will rise in 30 minutes, how should we adjust the cooling right now so the racks stay below the limit and we use as little electricity as possible?"**
 
-This version is a full redesign that follows the proposal: an ML forecast, MPC to choose a plan, a safety check, and a comparison against baselines.
-It **drops everything that was not needed**: no LLM agents, LangGraph, Gemini, FastAPI, Supabase/auth or SustainDC install.
-What is left is a small Python package with one file per step, a mock dataset you can open, and a dashboard with one tab per step.
+An **agent-based** system: three agents (Supervisor, Data Analyst, Cooling Advisor) answer an operator's question about the
+room by calling guarded Python tools. The tools are the proposal's pipeline: sensor data → cleaning → ML forecast → 81-plan MPC →
+safety filter, with a simulated room (plant) as the judge. The original agent architecture is kept: LangGraph, skills S1–S5,
+guardrails G1/G2/G3, and offline or Gemini mode. What changed is what the agents work with. They now read **sensor data from the
+data center**, use a **forecaster trained on a mock sensor dataset**, and choose a setpoint with **MPC**. Infrastructure that was
+not needed for the idea (FastAPI, Supabase/auth, SustainDC install, CSV import) is removed.
 
-![pipeline](docs/pipeline.png)
+![architecture](docs/pipeline.png)
 
-## The idea in one minute
+## Two layers
 
 ```mermaid
-flowchart LR
-    S["① Sensors<br/>dataset.py"] --> P["② Clean<br/>preprocess.py"] --> F["③ Forecast (ML)<br/>forecast.py"]
-    F --> M["④ MPC, 81 plans<br/>mpc.py"] --> G["⑤ Safety filter<br/>safety.py"] --> R["⑥ Plant (simulated room)<br/>plant.py"]
-    R -- "fresh sensor readings every 15 min (feedback)" --> F
+flowchart TD
+    Q["Operator question + moment"] --> G1["G1 · typed request, case time, scope, budgets"]
+    G1 --> SUP["Supervisor · S1 Plan"]
+    SUP -->|"G2: call_data_analyst"| DA["Data Analyst · S2 Inspect, S3 Analyze & Forecast"]
+    DA -->|"ready?"| SUP
+    SUP -->|"G2: call_cooling_advisor (recommend + data ready)"| CA["Cooling Advisor · S4 Evaluate plans"]
+    CA -->|"proposed setpoint"| SUP
+    SUP --> G3["G3 · re-read sensors, recompute forecast + MPC + safety, reject mismatch"]
+    G3 --> S5["Supervisor · S5 Compose verified answer (no actuation)"]
+    DA -.->|"tools"| T1["① read_sensors · ② inspect_data_quality · ③ summarize_state, forecast_hold"]
+    CA -.->|"tools"| T2["④ run_mpc · ⑤ check_safety · propose_setpoint"]
 ```
 
-Every 15 minutes the system:
+- **Agent layer (on demand)**: decides *what to check, in which order*, and explains. It cannot compute numbers itself, change
+  the 27 °C limit, call tools outside its skill, or touch equipment.
+- **Tool / control layer (every 15 min)**: the same Python steps also run the closed-loop controller that is scored on the plant.
 
-1. **Reads the sensors**: inlet temperature of 12 racks, IT and cooling power meters, CRAH status and outdoor weather.
-2. **Cleans the data**: fills short gaps, removes impossible values and catches stuck sensors.
-3. **Forecasts 15/30/45/60 minutes ahead**: if we use this setpoint plan, how hot will the hottest rack get, and how much cooling and IT power will we use?
-4. **Lets the MPC try 81 plans**: each 15-minute step can lower, keep or raise the setpoint by 1 °C, four times (3⁴ = 81). Plans predicted to go above 27 °C are thrown out, the cheapest remaining plan wins, and only its first step is applied.
-5. **Runs the safety filter**: every command is checked before it is sent. Missing sensors, conditions unlike the training data, or a rack near the limit override the AI immediately.
-6. **Lets the plant judge**: the simulated room scores the result. Every controller faces the same workload, weather and sensor noise.
+| Role | Skills | Tools (allowlist enforced by G2) |
+|---|---|---|
+| Supervisor (parent) | S1 Plan, S5 Compose | `call_data_analyst`, `call_cooling_advisor`, `finish_case` |
+| Data Analyst (child) | S2 Inspect, S3 Analyze & Forecast | `read_sensors`, `inspect_data_quality`, `summarize_state`, `forecast_hold`, `finish_analysis` |
+| Cooling Advisor (child) | S4 Evaluate plans | `run_mpc`, `check_safety`, `propose_setpoint` |
+
+| Guard | Where | Checks | Stops with |
+|---|---|---|---|
+| G1 | Before the graph | Pydantic request (15-min grid, known racks, question length), case time inside the log with 2 h history, budgets | `failed` |
+| G2 | Every tool call and delegation | Skill owner + tool allowlist, phase (e.g. no MPC before inspection), shared tool/model budget, deadline. Tools only see readings **at or before** the case time | `TOOL_NOT_ALLOWED`, `budget_exceeded` |
+| G3 | After the agents, before release | Re-reads the sensors, re-inspects quality, recomputes state, forecast, MPC and safety filter; proposal must equal the recomputed setpoint; range/rate limit; plan safe | `insufficient_data` (→ R1 fallback), `PROPOSAL_EVIDENCE_MISMATCH` |
+
+**Modes.** *Offline*: LangGraph runs fixed role procedures, no LLM, deterministic. *Gemini*: real parent/child function
+calling (separate histories, one tool per turn, phase-limited tool lists, shared budgets). Set `GEMINI_API_KEY` (and optionally
+`GEMINI_MODEL`) to use it. Without a key the case fails closed. **Live Gemini has not been tested here (no API key)**; the loops
+are tested with a scripted provider, including a forged proposal that G3 must reject.
+
+![agent trace](docs/agents-trace.png)
+
+Example case (`python -m predictive_cooling.agents --at "2026-04-21 00:30"`): the Data Analyst finds that holding 22 °C would
+reach 27.5 °C (incl. margin) when the 01:00 GPU batch starts. The Cooling Advisor finds 18 of 81 plans safe and proposes
+21 °C (plan 21 → 21 → 21 → 22). G3 re-reads and recomputes, all 6 checks pass, and the answer is "Change from 22 °C to 21 °C now". With
+`--fault B5 B6`, the data is not ready, the AI is withheld, and safety rule R1 moves toward the 20 °C fallback.
 
 ## Mock dataset: `data/sensor_history.csv`
 
@@ -67,7 +96,8 @@ Regenerate it with `python -m predictive_cooling.dataset` (seeds are fixed, so t
 | ⑤ | `safety.py` | R1 missing sensor → fallback, R2 unfamiliar conditions → fallback, R3 near the limit → cool by 2 °C now, R4 at most ±1 °C per 15 minutes and within 16–24 °C (fallback = the previous fixed setpoint, proven safe) |
 | ⑥ | `plant.py`, `evaluate.py` | The simulated room is the judge: 14-day closed-loop runs in 4 scenarios |
 | | `pipeline.py` | Runs every step end to end and tunes the baselines on validation (fixed = highest setpoint that never overheated, rule = lowest-energy deadband that never overheated) |
-| | `app.py` | Dashboard with 6 tabs, one per step |
+| | `agents/` | Agent layer: `engine.py` (LangGraph, G1/G2/G3, S5), `tools.py` (the tools above), `gemini.py` (function-calling loops), `skills.py` + `skill_specs/` (S1–S5) |
+| | `app.py` | Dashboard: “Ask the agents” tab + 6 tabs, one per step |
 
 ## Results (2 test weeks the model never saw)
 
@@ -149,14 +179,21 @@ To run only the pipeline and print the result tables:
 .venv/bin/python -m predictive_cooling.pipeline
 ```
 
-Tests (15 tests, about 10 seconds):
+Ask the agents from the command line:
+
+```bash
+.venv/bin/python -m predictive_cooling.agents --at "2026-04-21 00:30"
+```
+
+Tests (27 tests, about 20 seconds):
 
 ```bash
 .venv/bin/python -m pytest -q
 ```
 
-## Dashboard (6 tabs = 6 steps)
+## Dashboard
 
+0. **Ask the agents**: pick a moment, a task (recommend / analyze), optional failed sensors and the agent mode. You see the answer, a swimlane trace of who did what (G1 → Supervisor → G2 → Data Analyst → Cooling Advisor → G3), the G3 checklist and the forecast vs the chosen plan.
 1. **Sensors**: floor map (heatmap of the 12 racks) for any day and time, the whole day as charts, a column dictionary and a CSV download.
 2. **Clean data**: the problems found in each sensor, raw vs cleaned, and the train/validation/test split.
 3. **Forecast**: error by horizon, forecast vs actual, feature importance, and **a what-if where you set a setpoint plan and see what the model predicts**.
@@ -186,9 +223,15 @@ predictive_cooling/
   controllers.py             Fixed / Rule-based / AI controllers
   evaluate.py                closed-loop tests + fault scenarios
   pipeline.py                runs everything + saves artifacts/
+  agents/                    agent layer (Supervisor, Data Analyst, Cooling Advisor)
+    engine.py                LangGraph graph, G1/G2/G3, S5 compose, run_case()
+    tools.py                 the tools agents may call (window ends at the case time)
+    gemini.py                Gemini parent/child function-calling loops
+    skills.py, skill_specs/  S1–S5 registry and instructions
 tests/test_pipeline.py       tests for every step
+tests/test_agents.py         agent, guardrail and scripted-Gemini tests
 docs/                        README images
 Midterm Project /            proposal report (PDF)
 ```
 
-The previous version (agents/API/Supabase) is still in git history at commit `a817f29` and on the `main` branch.
+Branches: `main` = the earlier SustainDC/FastAPI/Supabase agent prototype; `claude` = the pipeline-only redesign (no agents); `claude-new-version` = this version (agent architecture + sensor data, trained forecaster and MPC).
