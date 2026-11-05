@@ -15,6 +15,10 @@ from .. import config as C
 from .models import StrictModel
 from .skills import SKILLS
 
+# Override with GEMINI_MODEL. flash-lite: fast, larger free quota (a case needs ~11 calls); the bigger
+# "gemini-flash-latest" often answers 503 "high demand" and free keys get ~20 requests/day on it.
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+
 
 class EmptyArgs(StrictModel):
     pass
@@ -67,7 +71,7 @@ class GeminiProvider:
                                                              retry_options=retry))
         try:
             response = client.models.generate_content(
-                model=os.getenv("GEMINI_MODEL", "gemini-flash-latest"), contents=history,
+                model=os.getenv("GEMINI_MODEL", DEFAULT_MODEL), contents=history,
                 config=types.GenerateContentConfig(
                     system_instruction=instructions, tools=[types.Tool(function_declarations=declarations)],
                     tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(

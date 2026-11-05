@@ -4,6 +4,7 @@
 """
 import os
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -693,32 +694,9 @@ def trace_chart(result):
     return style(fig, height=330, title="Who did what, in order (hover a dot)", hover="closest")
 
 
-with agent_tab:
-    st.subheader("Ask the agents about a moment in the room", icon=":material/smart_toy:")
-    in_short("Pick a moment and press **Run case**. Three agents split the work like a small team.",
-             "Agents never compute numbers themselves — they call checked tools, and **G3 recomputes everything** before "
-             "an answer is released.")
-    diagram("""
-sequenceDiagram
-    participant O as Operator
-    participant S as Supervisor
-    participant D as Data Analyst
-    participant C as Cooling Advisor
-    participant G as G3 verify
-    O->>S: question + moment (checked by G1)
-    S->>D: inspect sensors, forecast next hour
-    D-->>S: data OK? hold-setpoint forecast
-    S->>C: find the best safe setpoint
-    C-->>S: proposal (81-plan MPC + safety)
-    S->>G: re-read sensors, recompute all
-    G-->>O: verified answer (or fallback)
-""", alt="Sequence: operator asks Supervisor, Supervisor delegates to Data Analyst then Cooling Advisor, G3 verifies before answering")
-    st.markdown("<p class='note'>The <b>Supervisor</b> plans the case and delegates. The <b>Data Analyst</b> inspects the "
-                "sensors (S2), summarises the room and forecasts the next hour (S3). The <b>Cooling Advisor</b> runs the 81-plan "
-                "MPC and the safety filter and proposes a setpoint (S4). <b>G2</b> checks every tool call against the skill's "
-                "allowlist and budget; <b>G3</b> re-reads the sensors and recomputes everything before anything is released; the "
-                "Supervisor then writes the verified answer (S5). Tools only see the 2 hours up to the chosen moment.</p>",
-                unsafe_allow_html=True)
+@st.fragment
+def agent_case_panel():
+    """Controls, run and results of one case. A fragment: Run case reruns only this part, not all 7 tabs."""
     c1, c2, c3 = st.columns([1.1, 1, 1])
     with c1:
         case_day = st.selectbox("Day", TEST_DAYS, index=1, format_func=lambda d: f"{pd.Timestamp(d):%a %d %b}", key="ag_day")
@@ -732,16 +710,33 @@ sequenceDiagram
         has_key = bool(os.getenv("GEMINI_API_KEY"))
         agent_mode = st.segmented_control("Agent mode", ["offline", "gemini"], default="offline",
                                           format_func={"offline": "Offline roles", "gemini": "Gemini"}.get) or "offline"
-        st.caption("Offline = fixed role procedures, no LLM. Gemini = real parent/child function calling "
+        st.caption("Offline = fixed role procedures, no LLM, instant. Gemini = real function calling, about 11 model "
+                   "calls (30–60 s) "
                    + ("(API key found)." if has_key else "— set GEMINI_API_KEY to enable; without it the case fails closed."))
     question = st.text_input("Operator question", "What supply-air setpoint should we use for the next hour, and why?")
     request = CaseRequest(at=pd.Timestamp(f"{case_day} {case_time}").to_pydatetime(), question=question, mode=mode,
                           agent_mode=agent_mode, sensor_fault=tuple(fault))
     key = request.model_dump_json()
     if st.button("Run case", type="primary") or st.session_state.get("case_key") != key and "case" not in st.session_state:
-        with st.spinner("Agents working…"):
-            st.session_state.case = run_case(request, agent_context())
-            st.session_state.case_key = key
+        started = time.monotonic()
+        steps = st.status("Agents working…" + (" Gemini usually needs 30–60 s." if agent_mode == "gemini" else ""),
+                          expanded=agent_mode == "gemini")
+
+        def progress(event):
+            """Show each trace event as it happens, so a slow model call never looks like a frozen page."""
+            lane = LANE_NAME.get(event.actor, event.actor)
+            icon = (":material/cancel:" if event.status in ("blocked", "rejected", "failed")
+                    else ":material/check_circle:")
+            steps.markdown(f"{icon} {event.elapsed_ms / 1000:.0f} s · **{lane}** · {event.action}"
+                           + (f" · :gray[{event.detail[:90]}]" if event.detail else ""))
+            steps.update(label=f"Agents working… {time.monotonic() - started:.0f} s · {lane}: {event.action}")
+
+        st.session_state.case = run_case(request, agent_context(), on_event=progress)
+        st.session_state.case_key = key
+        done = st.session_state.case
+        steps.update(label=f"{done.status.replace('_', ' ').capitalize()} in {time.monotonic() - started:.1f} s"
+                           f" · {done.model_calls} model calls", expanded=False,
+                     state="complete" if done.status == "completed" else "error")
         error = storage.save_case(request, st.session_state.case)
         if error:
             st.toast(f"Case not saved to Supabase ({error})", icon=":material/cloud_off:")
@@ -816,6 +811,35 @@ sequenceDiagram
                     st.dataframe(history, hide_index=True, width="stretch")
             except Exception as exc:
                 st.warning(f"Could not read the history: {type(exc).__name__}: {exc}")
+
+
+with agent_tab:
+    st.subheader("Ask the agents about a moment in the room", icon=":material/smart_toy:")
+    in_short("Pick a moment and press **Run case**. Three agents split the work like a small team.",
+             "Agents never compute numbers themselves — they call checked tools, and **G3 recomputes everything** before "
+             "an answer is released.")
+    diagram("""
+sequenceDiagram
+    participant O as Operator
+    participant S as Supervisor
+    participant D as Data Analyst
+    participant C as Cooling Advisor
+    participant G as G3 verify
+    O->>S: question + moment (checked by G1)
+    S->>D: inspect sensors, forecast next hour
+    D-->>S: data OK? hold-setpoint forecast
+    S->>C: find the best safe setpoint
+    C-->>S: proposal (81-plan MPC + safety)
+    S->>G: re-read sensors, recompute all
+    G-->>O: verified answer (or fallback)
+""", alt="Sequence: operator asks Supervisor, Supervisor delegates to Data Analyst then Cooling Advisor, G3 verifies before answering")
+    st.markdown("<p class='note'>The <b>Supervisor</b> plans the case and delegates. The <b>Data Analyst</b> inspects the "
+                "sensors (S2), summarises the room and forecasts the next hour (S3). The <b>Cooling Advisor</b> runs the 81-plan "
+                "MPC and the safety filter and proposes a setpoint (S4). <b>G2</b> checks every tool call against the skill's "
+                "allowlist and budget; <b>G3</b> re-reads the sensors and recomputes everything before anything is released; the "
+                "Supervisor then writes the verified answer (S5). Tools only see the 2 hours up to the chosen moment.</p>",
+                unsafe_allow_html=True)
+    agent_case_panel()
 
 st.caption("Mock data from a simplified physics model (see predictive_cooling/plant.py). Results show the method, not the "
            "savings of a real facility. The tool recommends; it never controls equipment.")

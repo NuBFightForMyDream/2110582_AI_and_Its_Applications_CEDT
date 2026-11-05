@@ -139,3 +139,14 @@ def test_gemini_without_key_fails_closed(ctx, monkeypatch):
     result = run_case(CaseRequest(at=AT, agent_mode="gemini"), ctx)
     assert result.status == "failed" and result.reason_codes == ["GEMINI_NOT_CONFIGURED"]
     assert result.recommended_setpoint is None
+
+
+def test_on_event_streams_every_event_and_a_broken_callback_cannot_change_the_case(ctx):
+    seen = []
+    result = run_case(CaseRequest(at=AT), ctx, on_event=seen.append)
+    assert [e.step for e in seen] == [e.step for e in result.events]
+
+    def broken(event):
+        raise RuntimeError("UI crashed")
+    again = run_case(CaseRequest(at=AT), ctx, on_event=broken)
+    assert (again.status, again.recommended_setpoint) == (result.status, result.recommended_setpoint)

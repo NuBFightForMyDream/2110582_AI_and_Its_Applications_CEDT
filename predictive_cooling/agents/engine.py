@@ -43,6 +43,7 @@ class Runtime:
         self.ready = False
         self.proposal: float | None = None
         self.proposal_made = False
+        self.on_event = None
 
     # -- trace ------------------------------------------------------------------------------
     def event(self, actor, action, status="passed", skill=None, detail=""):
@@ -50,6 +51,11 @@ class Runtime:
                       detail=detail, elapsed_ms=round((time.monotonic() - self.started) * 1000, 2))
         self.result.events.append(event)
         LOG.info(json.dumps(event.model_dump()))
+        if self.on_event is not None:                  # live progress for a UI; never allowed to break a case
+            try:
+                self.on_event(event)
+            except Exception:
+                LOG.exception("on_event callback failed")
 
     def check_deadline(self):
         if time.monotonic() - self.started >= self.policy.deadline_seconds:
@@ -315,11 +321,13 @@ GRAPH = build_graph()
 
 
 def run_case(request: CaseRequest, ctx: T.AgentContext | None = None, policy: Policy | None = None,
-             case_id: str | None = None) -> CaseResult:
+             case_id: str | None = None, on_event=None) -> CaseResult:
+    """`on_event(event)` is called after every trace event (e.g. to show live progress); it cannot change the case."""
     ctx = ctx or T.default_context()
     # A live LLM needs ~10-12 sequential calls (plus retries on 429/503), so Gemini gets a longer deadline.
     policy = policy or (Policy(deadline_seconds=300) if request.agent_mode == "gemini" else Policy())
     rt = Runtime(request, ctx, policy, case_id or uuid4().hex[:12])
+    rt.on_event = on_event
     rt.result.execution = {"policy": policy.model_dump(), "request": request.model_dump(mode="json"),
                            "skills": {sid: {"version": s.version, "sha256": hashlib.sha256(s.instructions().encode()).hexdigest()[:16]}
                                       for sid, s in SKILLS.items()}}
