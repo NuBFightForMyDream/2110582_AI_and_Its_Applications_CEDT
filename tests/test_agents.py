@@ -1,10 +1,13 @@
-"""Agent layer: offline roles, Gemini parent/child loops (scripted, no paid API) and the G1/G2/G3 guards."""
+"""Agent layer: offline roles, Gemini and Claude parent/child loops (no paid API) and the G1/G2/G3 guards."""
+import json
+
 import pandas as pd
 import pytest
 from pydantic import ValidationError
 
 from predictive_cooling import dataset, forecast, preprocess
 from predictive_cooling.agents import AgentContext, CaseRequest, Policy, run_case
+from predictive_cooling.agents.claude import ClaudeProvider
 from predictive_cooling.agents.gemini import Call, Turn
 from predictive_cooling.agents.skills import SKILLS
 
@@ -138,6 +141,75 @@ def test_gemini_without_key_fails_closed(ctx, monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     result = run_case(CaseRequest(at=AT, agent_mode="gemini"), ctx)
     assert result.status == "failed" and result.reason_codes == ["GEMINI_NOT_CONFIGURED"]
+    assert result.recommended_setpoint is None
+
+
+# ---- Claude mode through the real SDK against a mock server (no API key, no cost) --------------
+class MockClaude:
+    """Answers each request with the next scripted tool call, or with `final` when set, and records the requests."""
+
+    def __init__(self, setpoint=21.0, final=None):
+        self.requests = []
+        self.final = final
+        self.script = [("call_data_analyst", {}), ("read_sensors", {}), ("inspect_data_quality", {}), ("summarize_state", {}),
+                       ("forecast_hold", {}), ("finish_analysis", {"note": "Batch at 01:00 ahead."}), ("call_cooling_advisor", {}),
+                       ("run_mpc", {}), ("check_safety", {"setpoint": setpoint}), ("propose_setpoint", {"setpoint": setpoint, "note": "Pre-cool."}),
+                       ("finish_case", {"note": "Done."})]
+
+    def __call__(self, request):
+        import httpx2
+        body = json.loads(request.content)
+        self.requests.append(body)
+        n = len(self.requests)
+        stop_reason, content = self.final or ("tool_use", [{"type": "tool_use", "id": f"toolu_{n}", "name": self.script[n - 1][0],
+                                                            "input": self.script[n - 1][1]}])
+        return httpx2.Response(200, json={"id": f"msg_{n}", "type": "message", "role": "assistant", "model": body["model"],
+                                          "content": content, "stop_reason": stop_reason, "stop_sequence": None,
+                                          "usage": {"input_tokens": 7, "output_tokens": 3}})
+
+
+def install_mock_claude(monkeypatch, mock):
+    anthropic = pytest.importorskip("anthropic")
+    httpx2 = pytest.importorskip("httpx2")
+    client = anthropic.Anthropic(api_key="test", max_retries=0,
+                                 http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(mock)))
+    monkeypatch.setattr("predictive_cooling.agents.claude.provider_factory", lambda: ClaudeProvider(client))
+
+
+def test_claude_runs_a_full_case_on_haiku_through_the_sdk(ctx, monkeypatch):
+    expected = run_case(CaseRequest(at=AT), ctx).recommended_setpoint
+    mock = MockClaude(setpoint=expected)
+    install_mock_claude(monkeypatch, mock)
+    result = run_case(CaseRequest(at=AT, agent_mode="claude"), ctx)
+    assert result.status == "completed", (result.reason_codes, result.events[-1].detail)
+    assert result.workflow_mode == "claude_parent_child_tool_calling"
+    assert result.recommended_setpoint == expected
+    assert result.model_calls == 11 and result.model_tokens == 110
+    assert result.execution["resolved_models"] == ["claude-haiku-5-5"]
+    for body, (name, _) in zip(mock.requests, mock.script):
+        assert body["tool_choice"] == {"type": "any", "disable_parallel_tool_use": True}
+        assert name in [tool["name"] for tool in body["tools"]]
+        assert "temperature" not in body and "fallbacks" not in body
+    # The supervisor's last turn carries the two delegations and their results, matched by id.
+    assistant, reply = mock.requests[-1]["messages"][-2:]
+    assert assistant["content"][0]["id"] == reply["content"][0]["tool_use_id"]
+
+
+@pytest.mark.parametrize("stop_reason, content, code", [
+    ("refusal", [], "MODEL_REFUSED"),
+    ("max_tokens", [], "MODEL_OUTPUT_TRUNCATED"),
+    ("end_turn", [{"type": "text", "text": "No tool."}], "ONE_TOOL_CALL_REQUIRED"),
+])
+def test_claude_answers_without_one_tool_call_fail_closed(ctx, monkeypatch, stop_reason, content, code):
+    install_mock_claude(monkeypatch, MockClaude(final=(stop_reason, content)))
+    result = run_case(CaseRequest(at=AT, agent_mode="claude"), ctx)
+    assert result.status == "failed" and result.reason_codes == [code] and result.recommended_setpoint is None
+
+
+def test_claude_without_key_fails_closed(ctx, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    result = run_case(CaseRequest(at=AT, agent_mode="claude"), ctx)
+    assert result.status == "failed" and result.reason_codes == ["CLAUDE_NOT_CONFIGURED"]
     assert result.recommended_setpoint is None
 
 

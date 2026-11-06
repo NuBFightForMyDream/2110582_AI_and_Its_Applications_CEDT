@@ -3,6 +3,7 @@
     python -m predictive_cooling.agents --at "2026-04-21 00:30"
     python -m predictive_cooling.agents --at "2026-04-21 00:30" --fault B5 B6
     python -m predictive_cooling.agents --at "2026-04-21 00:30" --mode analyze --agent gemini
+    python -m predictive_cooling.agents --at "2026-04-21 00:30" --agent claude
 """
 import argparse
 import json
@@ -15,7 +16,7 @@ def main():
     parser.add_argument("--at", default="2026-04-21 00:30")
     parser.add_argument("--question", default=None)
     parser.add_argument("--mode", choices=["recommend", "analyze"], default="recommend")
-    parser.add_argument("--agent", choices=["offline", "gemini"], default="offline")
+    parser.add_argument("--agent", choices=["offline", "gemini", "claude"], default="offline")
     parser.add_argument("--fault", nargs="*", default=[], help="racks whose sensors fail, e.g. B5 B6")
     parser.add_argument("--json", action="store_true", help="print the full result as JSON")
     args = parser.parse_args()

@@ -71,6 +71,8 @@ calling (separate histories, one tool per turn, phase-limited tool lists, shared
 cases get a 300 s deadline and retry 429/5xx errors. On a free key, prefer a flash-lite model: one case needs ~11
 requests, the bigger flash models allow only ~20 requests per day, and `gemini-flash-latest` often answers 503
 "high demand". The loops are also tested with a scripted provider, including a forged proposal that G3 must reject.
+*Claude*: the same loops on Claude Haiku 5.5, enabled by `ANTHROPIC_API_KEY` and billed per token. Each turn forces one
+tool call, and refusals or cut-off answers fail closed. Tested through the SDK against a mock server.
 
 ```mermaid
 sequenceDiagram
@@ -151,7 +153,7 @@ flowchart LR
 | ⑤ | `safety.py` | R1 missing sensor → fallback, R2 unfamiliar conditions → fallback, R3 near the limit → cool by 2 °C now, R4 at most ±1 °C per 15 minutes and within 16–24 °C (fallback = the previous fixed setpoint, proven safe) |
 | ⑥ | `plant.py`, `evaluate.py` | The simulated room is the judge: 14-day closed-loop runs in 4 scenarios |
 | | `pipeline.py` | Runs every step end to end and tunes the baselines on validation (fixed = highest setpoint that never overheated, rule = lowest-energy deadband that never overheated) |
-| | `agents/` | Agent layer: `engine.py` (LangGraph, G1/G2/G3, S5), `tools.py` (the tools above), `gemini.py` (function-calling loops), `skills.py` + `skill_specs/` (S1–S5) |
+| | `agents/` | Agent layer: `engine.py` (LangGraph, G1/G2/G3, S5), `tools.py` (the tools above), `llm_loops.py` (function-calling loops), `gemini.py` + `claude.py` (providers), `skills.py` + `skill_specs/` (S1–S5) |
 | | `app.py` | Dashboard: “Ask the agents” tab + 6 tabs, one per step |
 
 ## Results (2 test weeks the model never saw)
@@ -296,12 +298,13 @@ Tests (30 tests, about 40 seconds):
 ## Deploy
 
 LangGraph is a Python library that runs inside the Streamlit process, so the whole app is **one Streamlit service**.
-Gemini and Supabase are optional and switched on by secrets.
+Gemini, Claude and Supabase are optional and switched on by secrets.
 
 ```mermaid
 flowchart LR
     U["Browser"]:::step --> A["Streamlit app<br/>app.py + LangGraph agents<br/>+ forecaster (bundle.pkl)"]:::ai
     A -. "agent mode = Gemini<br/>GEMINI_API_KEY" .-> G["Gemini API"]:::step
+    A -. "agent mode = Claude<br/>ANTHROPIC_API_KEY" .-> CL["Claude API"]:::step
     A -. "SUPABASE_URL / SUPABASE_KEY" .-> D[("Supabase<br/>agent_cases")]:::ok
     classDef step fill:#ffffff,stroke:#c3c2b7,color:#0b0b0b
     classDef ai fill:#e8f1fc,stroke:#2a78d6,color:#0b0b0b,stroke-width:2px
@@ -315,11 +318,12 @@ flowchart LR
    Under *Advanced settings* choose **Python 3.12**.
 3. Paste your secrets (template: `.streamlit/secrets.toml.example`). Every key is optional:
    - `GEMINI_API_KEY` (from Google AI Studio) enables the *Gemini* agent mode; set `GEMINI_MODEL = "gemini-3.5-flash-lite"` on a free key.
+   - `ANTHROPIC_API_KEY` enables the *Claude* agent mode (Claude Haiku 5.5, billed per token).
    - `SUPABASE_URL` + `SUPABASE_KEY` enable the case history.
 
 **Supabase case history (optional)**
 
-1. Create a Supabase project and run `supabase/migrations/001_agent_cases.sql` in its SQL editor.
+1. Create a Supabase project and run `supabase/migrations/001_agent_cases.sql`, then `002_allow_claude_agent_mode.sql`, in its SQL editor.
 2. Put the project URL and the **server-side secret key** in the secrets. The key stays on the server (Streamlit code
    never runs in the browser); RLS is on and the public roles get no access to the table.
 3. Every *Run case* in the agents tab is saved; *Case history (Supabase)* at the bottom of the tab shows the latest 20.
@@ -366,10 +370,11 @@ predictive_cooling/
   agents/                    agent layer (Supervisor, Data Analyst, Cooling Advisor)
     engine.py                LangGraph graph, G1/G2/G3, S5 compose, run_case()
     tools.py                 the tools agents may call (window ends at the case time)
-    gemini.py                Gemini parent/child function-calling loops
+    llm_loops.py             parent/child function-calling loops shared by the live modes
+    gemini.py, claude.py     Gemini and Claude Haiku providers
     skills.py, skill_specs/  S1–S5 registry and instructions
 tests/test_pipeline.py       tests for every step
-tests/test_agents.py         agent, guardrail and scripted-Gemini tests
+tests/test_agents.py         agent, guardrail, scripted-Gemini and mock-server Claude tests
 tests/test_storage.py        Supabase history (off without keys, failures never break a case)
 artifacts/bundle.pkl         trained models + test logs (committed for deployment)
 supabase/migrations/         SQL for the optional agent_cases table

@@ -17,7 +17,7 @@ class CaseRequest(StrictModel):
     question: str = Field(default="What supply-air setpoint should we use for the next hour, and why?",
                           min_length=1, max_length=1000)
     mode: Literal["recommend", "analyze"] = "recommend"
-    agent_mode: Literal["offline", "gemini"] = "offline"
+    agent_mode: Literal["offline", "gemini", "claude"] = "offline"
     sensor_fault: tuple[str, ...] = Field(default=(), description="Demo: these racks' inlet sensors stop reporting "
                                                                    "for the last 45 minutes before `at`.")
 

@@ -36,7 +36,7 @@ st.set_page_config(page_title="Predictive Cooling", page_icon=":material/ac_unit
 
 # Deployed keys live in Streamlit secrets (.streamlit/secrets.toml locally, the Secrets box on Streamlit Cloud).
 # The agent and storage code read environment variables, so copy the known keys across once.
-for _name in ("GEMINI_API_KEY", "GEMINI_MODEL", "SUPABASE_URL", "SUPABASE_KEY"):
+for _name in ("GEMINI_API_KEY", "GEMINI_MODEL", "ANTHROPIC_API_KEY", "SUPABASE_URL", "SUPABASE_KEY"):
     try:
         if not os.getenv(_name) and _name in st.secrets:
             os.environ[_name] = str(st.secrets[_name])
@@ -719,12 +719,13 @@ def agent_case_panel():
                                     format_func={"recommend": "Recommend a setpoint", "analyze": "Analyze only"}.get) or "recommend"
         fault = st.multiselect("Simulate failed sensors", C.RACKS, default=[], help="These racks stop reporting for the last 45 min")
     with c3:
-        has_key = bool(os.getenv("GEMINI_API_KEY"))
-        agent_mode = st.segmented_control("Agent mode", ["offline", "gemini"], default="offline",
-                                          format_func={"offline": "Offline roles", "gemini": "Gemini"}.get) or "offline"
-        st.caption("Offline = fixed role procedures, no LLM, instant. Gemini = real function calling, about 11 model "
-                   "calls (30–60 s) "
-                   + ("(API key found)." if has_key else "— set GEMINI_API_KEY to enable; without it the case fails closed."))
+        agent_mode = st.segmented_control("Agent mode", ["offline", "gemini", "claude"], default="offline",
+                                          format_func={"offline": "Offline roles", "gemini": "Gemini", "claude": "Claude Haiku"}.get) or "offline"
+        key_name = {"gemini": "GEMINI_API_KEY", "claude": "ANTHROPIC_API_KEY"}.get(agent_mode)
+        st.caption("Offline = fixed role procedures, no LLM, instant. Gemini and Claude Haiku = real function calling, "
+                   "about 11 model calls."
+                   + ("" if key_name is None else " API key found." if os.getenv(key_name)
+                      else f" Set {key_name} to enable; without it the case fails closed."))
     question = st.text_input("Operator question", "What supply-air setpoint should we use for the next hour, and why?")
     request = CaseRequest(at=pd.Timestamp(f"{case_day} {case_time}").to_pydatetime(), question=question, mode=mode,
                           agent_mode=agent_mode, sensor_fault=tuple(fault))
@@ -732,7 +733,7 @@ def agent_case_panel():
     if st.button("Run case", type="primary") or st.session_state.get("case_key") != key and "case" not in st.session_state:
         started = time.monotonic()
         steps = st.status("Agents working…" + (" Gemini usually needs 30–60 s." if agent_mode == "gemini" else ""),
-                          expanded=agent_mode == "gemini")
+                          expanded=agent_mode != "offline")
 
         def progress(event):
             """Show each trace event as it happens, so a slow model call never looks like a frozen page."""

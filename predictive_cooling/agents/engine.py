@@ -4,10 +4,11 @@
                 ->  G3 re-read + recompute  ->  Supervisor (S5) composes the released answer
 
 Offline mode runs each role's procedure directly in a graph node (no LLM).
-Gemini mode replaces the three role nodes with real parent/child function-calling loops
-(see gemini.py); both paths share the same tools, G2 gateway, G3 and S5.
+Gemini and Claude modes replace the three role nodes with real parent/child function-calling loops
+(see llm_loops.py); all paths share the same tools, G2 gateway, G3 and S5.
 """
 import hashlib
+from importlib import import_module
 import json
 import logging
 import time
@@ -303,15 +304,16 @@ def build_graph():
     builder.add_node("supervisor_plan", supervisor_plan)
     builder.add_node("data_analyst", data_analyst)
     builder.add_node("cooling_advisor", cooling_advisor)
-    builder.add_node("gemini_agents", lambda s: __import__("predictive_cooling.agents.gemini", fromlist=["x"]).run_agents(s["runtime"]))
+    # Imported only when a live case runs. agent_mode is "gemini" or "claude" here, the name of the provider module.
+    builder.add_node("llm_agents", lambda s: import_module(f".{s['runtime'].request.agent_mode}", __package__).run_agents(s["runtime"]))
     builder.add_node("guardrail_g3", validate)
     builder.add_node("supervisor_finalize", supervisor_finalize)
-    builder.add_conditional_edges(START, lambda s: "gemini_agents" if s["runtime"].request.agent_mode == "gemini" else "supervisor_plan")
+    builder.add_conditional_edges(START, lambda s: "supervisor_plan" if s["runtime"].request.agent_mode == "offline" else "llm_agents")
     builder.add_edge("supervisor_plan", "data_analyst")
     builder.add_conditional_edges("data_analyst", lambda s: "cooling_advisor" if s["runtime"].ready and s["runtime"].request.mode == "recommend"
                                   else "guardrail_g3")
     builder.add_edge("cooling_advisor", "guardrail_g3")
-    builder.add_edge("gemini_agents", "guardrail_g3")
+    builder.add_edge("llm_agents", "guardrail_g3")
     builder.add_edge("guardrail_g3", "supervisor_finalize")
     builder.add_edge("supervisor_finalize", END)
     return builder.compile()
@@ -324,8 +326,8 @@ def run_case(request: CaseRequest, ctx: T.AgentContext | None = None, policy: Po
              case_id: str | None = None, on_event=None) -> CaseResult:
     """`on_event(event)` is called after every trace event (e.g. to show live progress); it cannot change the case."""
     ctx = ctx or T.default_context()
-    # A live LLM needs ~10-12 sequential calls (plus retries on 429/503), so Gemini gets a longer deadline.
-    policy = policy or (Policy(deadline_seconds=300) if request.agent_mode == "gemini" else Policy())
+    # A live LLM needs ~10-12 sequential calls (plus retries on 429/503), so live modes get a longer deadline.
+    policy = policy or (Policy() if request.agent_mode == "offline" else Policy(deadline_seconds=300))
     rt = Runtime(request, ctx, policy, case_id or uuid4().hex[:12])
     rt.on_event = on_event
     rt.result.execution = {"policy": policy.model_dump(), "request": request.model_dump(mode="json"),
@@ -350,7 +352,7 @@ def run_case(request: CaseRequest, ctx: T.AgentContext | None = None, policy: Po
     except Exception as exc:                                           # provider/config failures never look like success
         r = rt.result
         r.status, r.decision, r.recommended_setpoint, r.plan = "failed", "unavailable", None, []
-        r.reason_codes = ["GEMINI_NOT_CONFIGURED" if str(exc) == "GEMINI_NOT_CONFIGURED" else "WORKFLOW_ERROR"]
+        r.reason_codes = [str(exc) if str(exc) in ("GEMINI_NOT_CONFIGURED", "CLAUDE_NOT_CONFIGURED") else "WORKFLOW_ERROR"]
         r.explanation = "The workflow failed; no recommendation was released (" + r.reason_codes[0] + ")."
         rt.event("workflow", "stop", "failed", detail=type(exc).__name__)
     rt.result.elapsed_ms = round((time.monotonic() - rt.started) * 1000, 2)
