@@ -1,3 +1,13 @@
-# Cloud entrypoint; the local prototype is installed as a package.
--c requirements.lock.txt
--e .[integrations]
+# Exact versions: the committed artifacts/bundle.pkl is only reused when scikit-learn matches exactly
+# (otherwise the app retrains on first start). Built and tested on Python 3.12.
+numpy==2.5.4
+pandas==3.1.1
+scikit-learn==1.9.1
+plotly==7.1.0
+streamlit==1.66.1
+langgraph==1.2.20
+pydantic==2.14.3
+google-genai==2.34.0    # Gemini agent mode
+supabase==2.34.0        # optional case history (only used when SUPABASE_URL / SUPABASE_KEY are set)
+pytest==9.2.0
+watchdog==6.0.0       # lets Streamlit watch files with OS events instead of CPU-heavy polling; streamlit requires <7 on Linux

@@ -1,12 +1,28 @@
 [browser]
 gatherUsageStats = false
 
+# Locked light theme: the Plotly charts in app.py use a light palette.
+# primaryColor matches the "AI" blue used in every chart.
 [theme]
-primaryColor = "#0f766e"
-backgroundColor = "#f8fafc"
-secondaryBackgroundColor = "#e9eff3"
-textColor = "#172b3a"
-font = "sans serif"
+base = "light"
+primaryColor = "#2a78d6"
+backgroundColor = "#f7f8fa"
+secondaryBackgroundColor = "#eef2f7"
+textColor = "#0f1b2d"
+borderColor = "#dfe3ea"
+linkColor = "#2a78d6"
+blueColor = "#2a78d6"
+greenColor = "#1baf7a"
+orangeColor = "#eb6834"
+redColor = "#d03b3b"
+violetColor = "#6250d6"
+showWidgetBorder = true
+baseRadius = "10px"
+buttonRadius = "8px"
+font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFontWeights = [700, 650, 600, 600, 600, 600]
+metricValueFontWeight = 650
+dataframeHeaderBackgroundColor = "#eef2f7"
 
 [client]
 toolbarMode = "minimal"
