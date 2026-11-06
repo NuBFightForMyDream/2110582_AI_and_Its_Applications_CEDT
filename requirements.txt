@@ -10,4 +10,4 @@ pydantic==2.14.3
 google-genai==2.34.0    # Gemini agent mode
 supabase==2.34.0        # optional case history (only used when SUPABASE_URL / SUPABASE_KEY are set)
 pytest==9.2.0
-watchdog==7.1.0       # lets Streamlit watch files with OS events instead of CPU-heavy polling
+watchdog==6.0.0       # lets Streamlit watch files with OS events instead of CPU-heavy polling; streamlit requires <7 on Linux
